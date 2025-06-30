@@ -1,0 +1,19 @@
+{
+  "name": "studymate-v2",
+  "private": true,
+  "workspaces": [
+    "frontend/my-study-mate"
+  ],
+  "scripts": {
+    "dev:frontend": "npm run dev --workspace=frontend/my-study-mate",
+    "build:frontend": "npm run build --workspace=frontend/my-study-mate",
+    "lint:frontend": "npm run lint --workspace=frontend/my-study-mate",
+    "dev:backend": "cd backend && uvicorn main:app --reload",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "start:backend": "cd backend && uvicorn main:app",
+    "test:backend": "cd backend && python -m pytest"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

@@ -3,8 +3,59 @@ import "./App.css";
 import { useEffect, useRef } from "react";
 import VanillaTilt from "vanilla-tilt";
 import { motion, AnimatePresence, useAnimation } from "framer-motion";
+import ReactMarkdown from 'react-markdown';
 
 const ACCENT_HUES = [185, 315, 35]; // cyan, pink, peach
+
+// Shared function to get all topic chunks by cross-referencing segment_positions with segments
+const getAllTopicChunks = (
+  topicData: TopicResponse['topics'][string], 
+  allSegments?: Array<{ position: string; text: string }>,
+  topicId?: string,
+  context?: string
+): string[] => {
+  const contextLabel = context || "getAllTopicChunks";
+  console.log(`🔍 ${contextLabel} called for topic ${topicId || 'unknown'}`);
+  console.log(`📊 ${contextLabel} topic data available:`, {
+    hasSegmentPositions: !!topicData.segment_positions,
+    segmentPositionsCount: topicData.segment_positions?.length || 0,
+    examplesCount: topicData.examples?.length || 0,
+    hasAllSegments: !!allSegments,
+    allSegmentsCount: allSegments?.length || 0
+  });
+
+  if (!topicData.segment_positions || !allSegments) {
+    console.warn(`⚠️ ${contextLabel}: Missing segment_positions or segments data, falling back to examples`);
+    console.log(`📝 ${contextLabel} fallback: Using ${topicData.examples?.length || 0} examples instead`);
+    return topicData.examples || [];
+  }
+  
+  // Create a lookup map for faster access
+  const segmentMap = new Map<string, string>();
+  allSegments.forEach(segment => {
+    segmentMap.set(segment.position, segment.text);
+  });
+  console.log(`🗂️ ${contextLabel}: Created segment lookup map with ${segmentMap.size} positions`);
+  
+  // Extract all chunks for this topic
+  const topicChunks = topicData.segment_positions
+    .map((position: string) => segmentMap.get(position))
+    .filter((chunk: string | undefined): chunk is string => Boolean(chunk));
+  
+  const improvement = topicChunks.length - (topicData.examples?.length || 0);
+  console.log(`🎯 ${contextLabel}: Successfully extracted ${topicChunks.length} chunks for topic ${topicId || 'unknown'}`);
+  console.log(`📈 ${contextLabel} improvement: +${improvement} chunks over examples (${topicData.examples?.length || 0} -> ${topicChunks.length})`);
+  
+  // Log first few chunks for verification (only for main expansion, not debug)
+  if (context === "Expansion" && topicChunks.length > 0) {
+    console.log(`📄 First chunk preview: "${topicChunks[0].substring(0, 100)}..."`);
+    if (topicChunks.length > 1) {
+      console.log(`📄 Last chunk preview: "${topicChunks[topicChunks.length - 1].substring(0, 100)}..."`);
+    }
+  }
+  
+  return topicChunks;
+};
 
 type UploadResponse = {
   filename: string;
@@ -22,10 +73,30 @@ type DebugResult = {
   topic_similarities: { [key: string]: number };
 };
 
+type ExpandedBulletResult = {
+  original_bullet: string;
+  expanded_bullets: string[];  // Changed from expanded_content to expanded_bullets
+  topic_heading: string;
+  chunks_used: number;
+};
+
+type NestedExpansions = {
+  [bulletKey: string]: {
+    expansion: ExpandedBulletResult;
+    subExpansions?: NestedExpansions;
+  };
+};
+
+type BulletExpansion = {
+  expansion: ExpandedBulletResult;
+  subExpansions?: NestedExpansions;
+};
+
 type TopicResponse = {
   num_chunks: number;
   num_topics: number;
   total_tokens_used: number;
+  segments?: Array<{ position: string; text: string }>; // Added segments
   topics: {
     [key: string]: {
       concepts: string[];
@@ -33,14 +104,35 @@ type TopicResponse = {
       summary: string;
       keywords: string[];
       examples: string[];
+      segment_positions?: string[]; // Added segment_positions
       stats: {
         num_chunks: number;
         min_size: number;
         mean_size: number;
         max_size: number;
       };
-      bullet_points?: string[]; // Added bullet_points property
-      debugResult?: DebugResult; // Added debugResult property
+      bullet_points?: string[];
+      bullet_expansions?: {
+        [bulletKey: string]: {
+          original_bullet?: string;
+          expanded_bullets: string[];
+          layer: number;
+          topic_heading: string;
+          chunks_used: number;
+          timestamp: string;
+          sub_expansions?: {
+            [subBulletKey: string]: {
+              original_bullet?: string;
+              expanded_bullets: string[];
+              layer: number;
+              topic_heading: string;
+              chunks_used: number;
+              timestamp: string;
+            };
+          };
+        };
+      };
+      debugResult?: DebugResult;
     };
   };
 };
@@ -78,6 +170,9 @@ function App() {
     num_chunks: number;
     total_words: number;
   } | null>(null);
+  const [isDeveloperMode, setIsDeveloperMode] = useState(false);
+  const [expandedBullets, setExpandedBullets] = useState<NestedExpansions>({});
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       setFile(e.target.files[0]);
@@ -138,6 +233,8 @@ function App() {
         setError(data.error);
       } else {
         setTopics(data);
+        // Load saved expansions when topics are loaded
+        loadSavedExpansions(data);
       }
     } catch {
       setError("Failed to generate headings.");
@@ -193,7 +290,10 @@ function App() {
               if (parsed.stage === "done" && parsed.result) {
                 setResponse(parsed.result);
                 if (parsed.result.topics) {
-                  setTopics({ ...parsed.result, topics: parsed.result.topics });
+                  const topicsData = { ...parsed.result, topics: parsed.result.topics };
+                  setTopics(topicsData);
+                  // Load saved expansions when topics are loaded from upload
+                  loadSavedExpansions(topicsData);
                 }
               }
 
@@ -398,12 +498,18 @@ function App() {
       return;
     }
 
-    const topicChunks = topics.topics[topicId].examples; // Assuming 'examples' are the chunks
+    const topic = topics.topics[topicId];
+    
+    // Try to get all chunks, fallback to examples if not available
+    const topicChunks = getAllTopicChunks(topic, topics?.segments, topicId, "Debug") || topic.examples || [];
+    
     // Convert topics to the structure expected by the backend
     const allTopics = Object.keys(topics.topics).reduce((acc, id) => {
+      const topicData = topics.topics[id];
+      const chunks = getAllTopicChunks(topicData, topics?.segments, id, "Debug-All") || topicData.examples || [];
       acc[id] = {
-        examples: topics.topics[id].examples,
-        heading: topics.topics[id].heading
+        examples: chunks, // Use all chunks, not just examples
+        heading: topicData.heading
       };
       return acc;
     }, {} as { [key: string]: { examples: string[], heading: string } });
@@ -461,6 +567,219 @@ function App() {
     } catch (error) {
       console.error("Failed to debug bullet point:", error);
     }
+  };
+
+  const handleExpandBulletPoint = async (bulletPoint: string, topicId: string) => {
+    console.log("🔧 Expand bullet point clicked:", { bulletPoint, topicId });
+    
+    if (!topics || !topics.topics[topicId]) {
+      console.error("❌ No topics or topic not found:", { topics: !!topics, topicExists: !!topics?.topics[topicId] });
+      return;
+    }
+
+    const topic = topics.topics[topicId];
+    
+    // Try to get all chunks, fallback to examples if not available
+    const topicChunks = getAllTopicChunks(topic, topics?.segments, topicId, "Expansion") || topic.examples || [];
+    const topicHeading = topic.heading;
+
+    console.log("📊 Expansion request data:", { 
+      bullet_point: bulletPoint,
+      chunks_count: topicChunks?.length || 0,
+      topic_heading: topicHeading 
+    });
+
+    try {
+      const res = await fetch("http://localhost:8000/expand-bullet-point", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          bullet_point: bulletPoint,
+          chunks: topicChunks,
+          topic_heading: topicHeading,
+          filename: response?.filename, // Add filename for saving
+          topic_id: topicId, // Add topic_id for saving
+          layer: 1, // First expansion layer
+        }),
+      });
+
+      if (!res.ok) {
+        console.error("❌ HTTP error:", res.status, res.statusText);
+        const errorText = await res.text();
+        console.error("Error response:", errorText);
+        return;
+      }
+
+      const data = await res.json();
+      console.log("📥 Backend expansion response:", data);
+
+      if (data.error) {
+        console.error("Error expanding bullet point:", data.error);
+      } else {
+        console.log("✅ Expansion result received:", data);
+        // Store the expansion result using a consistent key generation
+        const bulletKey = `${topicId}_${generateBulletKey(bulletPoint)}`;
+        console.log(`🔑 Generated frontend expansion key: '${bulletKey}'`);
+        
+        setExpandedBullets(prev => ({
+          ...prev,
+          [bulletKey]: {
+            expansion: data,
+            subExpansions: {}
+          }
+        }));
+      }
+    } catch (error) {
+      console.error("Failed to expand bullet point:", error);
+    }
+  };
+
+  const handleExpandSubBulletPoint = async (
+    subBullet: string, 
+    topicId: string, 
+    parentBulletKey: string,
+    depth: number = 1
+  ) => {
+    // Prevent infinite recursion by limiting depth to maximum 2 layers
+    if (depth >= 2) {
+      console.log("Maximum expansion depth of 2 layers reached");
+      return;
+    }
+
+    console.log("🔍 Expanding sub-bullet:", subBullet);
+    console.log("Parent bullet key:", parentBulletKey);
+    console.log("Expansion depth:", depth);
+
+    const topic = topics?.topics[topicId];
+    if (!topic) {
+      console.error("Topic not found for expansion:", topicId);
+      return;
+    }
+
+    // Try to get all chunks, fallback to examples if not available
+    const topicChunks = getAllTopicChunks(topic, topics?.segments, topicId, "Sub-bullet Expansion") || topic.examples || [];
+    const topicHeading = topic.heading || `Topic ${topicId}`;
+
+    try {
+      const res = await fetch("http://localhost:8000/expand-bullet-point", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          bullet_point: subBullet,
+          chunks: topicChunks,
+          topic_heading: topicHeading,
+          filename: response?.filename, // Add filename for saving
+          topic_id: topicId, // Add topic_id for saving
+          parent_bullet: parentBulletKey, // Add parent bullet for layer 2 tracking
+          layer: depth + 1, // Pass the layer based on expansion depth
+        }),
+      });
+
+      if (!res.ok) {
+        console.error("❌ HTTP error:", res.status, res.statusText);
+        return;
+      }
+
+      const data = await res.json();
+      console.log("📥 Backend sub-bullet expansion response:", data);
+
+      if (data.error) {
+        console.error("Error expanding sub-bullet:", data.error);
+      } else {
+        console.log("✅ Sub-bullet expansion result received:", data);
+        // Store the sub-expansion result in the nested structure
+        const subBulletKey = `${parentBulletKey}_sub_${subBullet.slice(0, 30)}`;
+        setExpandedBullets(prev => {
+          const updated = { ...prev };
+          
+          // Ensure the parent expansion exists
+          if (updated[parentBulletKey]) {
+            if (!updated[parentBulletKey].subExpansions) {
+              updated[parentBulletKey].subExpansions = {};
+            }
+            updated[parentBulletKey].subExpansions![subBulletKey] = {
+              expansion: data,
+              subExpansions: {}
+            };
+          }
+          
+          return updated;
+        });
+      }
+    } catch (error) {
+      console.error("Failed to expand sub-bullet:", error);
+    }
+  };
+
+  // Function to generate a consistent bullet key (must match backend logic)
+  const generateBulletKey = (bulletPoint: string): string => {
+    // Remove markdown formatting and limit length (match backend logic)
+    const cleanBullet = bulletPoint.replace(/^[-*+]\s*/, '').trim();
+    return cleanBullet.slice(0, 80); // Use first 80 chars as key
+  };
+  
+  // Function to load saved bullet point expansions
+  const loadSavedExpansions = (topicsData: TopicResponse) => {
+    console.log("🔄 Loading saved expansions from topics data");
+    const newExpandedBullets: Record<string, BulletExpansion> = {};
+    
+    Object.entries(topicsData.topics).forEach(([topicId, topic]) => {
+      const bulletExpansions = topic.bullet_expansions;
+      if (bulletExpansions) {
+        console.log(`📂 Found saved expansions for topic ${topicId}:`, bulletExpansions);
+        
+        Object.entries(bulletExpansions).forEach(([bulletKey, expansionData]) => {
+          const originalBullet = expansionData.original_bullet || bulletKey;
+          const frontendKey = `${topicId}_${generateBulletKey(originalBullet)}`;
+          
+          console.log(`🔑 Loading layer 1 expansion: backend key '${bulletKey}' -> frontend key '${frontendKey}'`);
+          
+          // Load the main expansion
+          newExpandedBullets[frontendKey] = {
+            expansion: {
+              original_bullet: originalBullet,
+              expanded_bullets: expansionData.expanded_bullets,
+              topic_heading: expansionData.topic_heading,
+              chunks_used: expansionData.chunks_used
+            },
+            subExpansions: {}
+          };
+          
+          // Load layer 2 sub-expansions if they exist
+          if (expansionData.sub_expansions) {
+            console.log(`🔗 Loading layer 2 sub-expansions for '${frontendKey}':`, expansionData.sub_expansions);
+            
+            Object.entries(expansionData.sub_expansions).forEach(([subKey, subExpansionData]) => {
+              const originalSubBullet = subExpansionData.original_bullet || subKey;
+              const subFrontendKey = `${frontendKey}_sub_${originalSubBullet.slice(0, 30)}`;
+              
+              console.log(`🔑 Loading layer 2 expansion: backend key '${subKey}' -> frontend key '${subFrontendKey}'`);
+              
+              if (!newExpandedBullets[frontendKey].subExpansions) {
+                newExpandedBullets[frontendKey].subExpansions = {};
+              }
+              
+              newExpandedBullets[frontendKey].subExpansions![subFrontendKey] = {
+                expansion: {
+                  original_bullet: originalSubBullet,
+                  expanded_bullets: subExpansionData.expanded_bullets,
+                  topic_heading: subExpansionData.topic_heading,
+                  chunks_used: subExpansionData.chunks_used
+                },
+                subExpansions: {}
+              };
+            });
+          }
+        });
+      }
+    });
+    
+    console.log("✅ Loaded saved expansions:", newExpandedBullets);
+    setExpandedBullets(newExpandedBullets);
   };
 
   const renderDebugResult = (topicId: string) => {
@@ -540,6 +859,113 @@ function App() {
           </ul>
         </div>
       </div>
+    );
+  };
+
+  const renderSubBullets = (
+    subBullets: string[], 
+    parentBulletKey: string, 
+    topicId: string, 
+    subExpansions: NestedExpansions = {},
+    depth: number = 1
+  ) => {
+    return (
+      <ul style={{
+        margin: "0.5rem 0 0 0",
+        paddingLeft: "1.5rem",
+        listStyleType: depth === 1 ? "circle" : "square",
+        color: "#ddd"
+      }}>
+        {subBullets.map((subBullet: string, subIdx: number) => {
+          const cleanedSubBullet = subBullet.replace(/^[-*+]\s*/, '').trim();
+          const subBulletKey = `${parentBulletKey}_sub_${subBullet.slice(0, 30)}`;
+          const subExpansion = subExpansions[subBulletKey];
+          
+          return (
+            <li 
+              key={subBulletKey}
+              style={{ 
+                marginBottom: "0.5rem",
+                fontSize: "inherit",
+                lineHeight: "inherit",
+                cursor: depth < 2 ? "pointer" : "default", // Only clickable if under depth limit
+                opacity: depth < 2 ? 1 : 0.8 // Slightly fade out non-clickable items
+              }}
+              onClick={(e) => {
+                e.stopPropagation(); // Prevent parent click
+                if (depth < 2) {
+                  if (isDeveloperMode) {
+                    handleDebugBulletPoint(subBullet, topicId);
+                  } else {
+                    handleExpandSubBulletPoint(subBullet, topicId, parentBulletKey, depth);
+                  }
+                }
+              }}
+            >
+              <div>
+                <ReactMarkdown>{cleanedSubBullet}</ReactMarkdown>
+                {subExpansion && subExpansion.expansion.expanded_bullets && (
+                  renderSubBullets(
+                    subExpansion.expansion.expanded_bullets,
+                    subBulletKey,
+                    topicId,
+                    subExpansion.subExpansions || {},
+                    depth + 1
+                  )
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    );
+  };
+
+  const renderBulletPoints = (bulletPoints: string[], topicId: string) => {
+    return (
+      <ul style={{ 
+        margin: "0.5rem 0 0 0", 
+        paddingLeft: "1.5rem",
+        color: "#ddd",
+        listStyleType: "disc"
+      }}>
+        {bulletPoints.map((point, idx) => {
+          // Remove markdown list formatting (-, *, +) from the beginning of bullet points
+          // since we're using HTML list styling
+          const cleanedPoint = point.replace(/^[-*+]\s*/, '').trim();
+          const bulletKey = `${topicId}_${generateBulletKey(point)}`;
+          const isExpanded = expandedBullets[bulletKey];
+          
+          console.log(`🔍 Rendering bullet ${idx}: key='${bulletKey}', expanded=${!!isExpanded}`);
+          
+          return (
+            <li 
+              key={bulletKey} 
+              style={{ marginBottom: "0.5rem", cursor: "pointer" }}
+              onClick={() => {
+                if (isDeveloperMode) {
+                  handleDebugBulletPoint(point, topicId);
+                } else {
+                  handleExpandBulletPoint(point, topicId);
+                }
+              }}
+            >
+              <div>
+                <ReactMarkdown>{cleanedPoint}</ReactMarkdown>
+                {isExpanded && isExpanded.expansion.expanded_bullets && (
+                  renderSubBullets(
+                    isExpanded.expansion.expanded_bullets,
+                    bulletKey,
+                    topicId,
+                    isExpanded.subExpansions || {},
+                    1
+                  )
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
     );
   };
 
@@ -888,22 +1314,7 @@ function App() {
                       <strong style={{ color: "#ccc", fontSize: "0.9rem" }}>
                         Key Bullet Points:
                       </strong>
-                      <ul style={{ 
-                        margin: "0.5rem 0 0 0", 
-                        paddingLeft: "1.5rem",
-                        color: "#ddd",
-                        listStyleType: "disc"
-                      }}>
-                        {topic.bullet_points.map((point, idx) => (
-                          <li 
-                            key={idx} 
-                            style={{ marginBottom: "0.5rem", cursor: "pointer" }}
-                            onClick={() => handleDebugBulletPoint(point, topicId)}
-                          >
-                            {point.replace(/^\s*-\s*/, '')}
-                          </li>
-                        ))}
-                      </ul>
+                      {renderBulletPoints(topic.bullet_points, topicId)}
                     </div>
                   )}
 
@@ -914,6 +1325,42 @@ function App() {
             </div>
           </div>
         )}
+
+        {/* Developer Mode Toggle */}
+        <div style={{ 
+          position: "fixed", 
+          top: "1rem", 
+          right: "1rem", 
+          zIndex: 1000,
+          background: "rgba(0, 0, 0, 0.8)",
+          padding: "0.5rem 1rem",
+          borderRadius: "8px",
+          border: "1px solid rgba(255, 255, 255, 0.2)"
+        }}>
+          <label style={{ 
+            display: "flex", 
+            alignItems: "center", 
+            gap: "0.5rem", 
+            color: "#fff",
+            fontSize: "0.9rem",
+            cursor: "pointer"
+          }}>
+            <input
+              type="checkbox"
+              checked={isDeveloperMode}
+              onChange={(e) => setIsDeveloperMode(e.target.checked)}
+              style={{ margin: 0 }}
+            />
+            Developer Mode
+          </label>
+          <div style={{ 
+            fontSize: "0.75rem", 
+            color: "#999", 
+            marginTop: "0.2rem" 
+          }}>
+            {isDeveloperMode ? "🔧 Click bullets to debug" : "📖 Click bullets to expand"}
+          </div>
+        </div>
       </div>
     </>
   );

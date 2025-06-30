@@ -1,26 +1,15 @@
 import os
 import numpy as np
-from openai import OpenAI
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import tiktoken
 from typing import List, Dict, Tuple
+from .openai_client import get_openai_client
 
 load_dotenv()
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 encoding = tiktoken.encoding_for_model("gpt-4o-mini")
-
-
-def get_openai_client():
-    """Initialize and return the OpenAI client, handling missing API key gracefully."""
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "OPENAI_API_KEY is not set in the environment variables."
-        )
-    return OpenAI(api_key=api_key)
-
 
 client = get_openai_client()
 

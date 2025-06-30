@@ -6,6 +6,7 @@ import json
 from uuid import uuid4
 from fastapi import BackgroundTasks
 import asyncio
+from datetime import datetime
 from utils.bullet_point_debugger import debug_bullet_point
 
 router = APIRouter()
@@ -144,10 +145,16 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
                         "summary": cluster.get("summary", ""),  # Include summary field
                         "keywords": cluster.get("keywords", []),
                         "examples": cluster.get("examples", []),
+                        "segment_positions": cluster.get(
+                            "segment_positions", []
+                        ),  # Include segment_positions for full chunk access
                         "stats": cluster.get("stats", {}),
                         "bullet_points": cluster.get(
                             "bullet_points", None
                         ),  # Include bullet_points if they exist
+                        "bullet_expansions": cluster.get(
+                            "bullet_expansions", {}
+                        ),  # Include bullet_expansions if they exist
                     }
                     for cluster in clusters
                 }
@@ -168,6 +175,7 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
                         "filetype": ext,
                         "text": full_text.strip(),
                         "message": "Using previously generated topics.",
+                        "segments": segments,  # Include segments for frontend chunk access
                         "topics": topics,
                     },
                 )
@@ -418,6 +426,9 @@ def generate_headings(data: dict):
     return {
         "message": "Topics generated successfully.",
         "num_topics": result["num_topics"],
+        "num_chunks": result.get("num_chunks", 0),
+        "total_tokens_used": result.get("total_tokens_used", 0),
+        "segments": result.get("segments", chunks),  # Include segments for frontend
         "topics": result["topics"],
     }
 
@@ -518,3 +529,147 @@ def debug_bullet_point_endpoint(data: dict):
         return result
     except Exception as e:
         return {"error": f"Failed to debug bullet point: {str(e)}"}
+
+
+@router.post("/expand-bullet-point")
+def expand_bullet_point_endpoint(data: dict):
+    """
+    Expand a bullet point with additional detail and context.
+
+    Args:
+        data (dict): A dictionary containing 'bullet_point' (str), 'chunks' (list of str), 'topic_heading' (str),
+                     'filename' (str), 'topic_id' (str), and optional 'layer' (int).
+
+    Returns:
+        dict: Expansion result including the original bullet point and expanded content.
+    """
+    bullet_point = data.get("bullet_point")
+    chunks = data.get("chunks", [])
+    topic_heading = data.get("topic_heading", "Unknown Topic")
+    filename = data.get("filename")
+    topic_id = data.get("topic_id")
+    layer = data.get("layer", 1)  # Default to layer 1 if not specified
+
+    print(f"\n🎯 Expand bullet point endpoint called")
+    print(f"📝 Bullet point: {bullet_point[:50] if bullet_point else 'None'}...")
+    print(f"📦 Received {len(chunks)} chunks for expansion")
+    print(f"🏷️ Topic heading: {topic_heading}")
+    print(f"📁 Filename: {filename}")
+    print(f"🆔 Topic ID: {topic_id}")
+    print(f"🔢 Expansion layer: {layer}")
+
+    if not bullet_point or not chunks:
+        error_msg = "Missing required fields: 'bullet_point' or 'chunks'."
+        print(f"❌ Error: {error_msg}")
+        return {"error": error_msg}
+
+    try:
+        from utils.expand_bullet_point import expand_bullet_point
+
+        result = expand_bullet_point(bullet_point, chunks, topic_heading, layer)
+        print(f"✅ Expansion completed successfully")
+
+        # Save the expansion to the processed JSON file following the same pattern as expand_cluster.py
+        if filename and topic_id and not result.get("error"):
+            try:
+                base_name = os.path.splitext(filename)[0]
+                processed_file = os.path.join(
+                    "processed", f"{base_name}_processed.json"
+                )
+
+                if os.path.exists(processed_file):
+                    with open(processed_file, "r", encoding="utf-8") as f:
+                        processed_data = json.load(f)
+
+                    # Find the cluster in the processed data (same as expand_cluster.py)
+                    clusters = processed_data.get("clusters", [])
+                    cluster = None
+                    for c in clusters:
+                        if str(c.get("cluster_id")) == str(topic_id):
+                            cluster = c
+                            break
+
+                    if cluster:
+                        # Initialize bullet_expansions if it doesn't exist
+                        if "bullet_expansions" not in cluster:
+                            cluster["bullet_expansions"] = {}
+
+                        # Create a unique key for this bullet point
+                        import re
+
+                        clean_bullet = re.sub(r"^[-*+]\s*", "", bullet_point).strip()
+                        bullet_key = clean_bullet[:80]
+
+                        print(f"🔑 Generated bullet key: '{bullet_key}'")
+
+                        # Initialize the expansion for this bullet if it doesn't exist
+                        if bullet_key not in cluster["bullet_expansions"]:
+                            cluster["bullet_expansions"][bullet_key] = {}
+
+                        # Store the expansion result
+                        expansion_data = {
+                            "original_bullet": bullet_point,
+                            "expanded_bullets": result.get("expanded_bullets", []),
+                            "layer": layer,
+                            "topic_heading": topic_heading,
+                            "chunks_used": result.get("chunks_used", 0),
+                            "timestamp": str(datetime.now()),
+                        }
+
+                        if layer == 1:
+                            cluster["bullet_expansions"][bullet_key] = expansion_data
+                        elif layer == 2:
+                            # For layer 2, we need to save it nested under the parent bullet
+                            parent_bullet = data.get("parent_bullet", "")
+                            if parent_bullet:
+                                # Extract the actual bullet text from the parent key (remove topic ID prefix)
+                                if parent_bullet.startswith(f"{topic_id}_"):
+                                    parent_bullet_text = parent_bullet[len(f"{topic_id}_"):]
+                                else:
+                                    parent_bullet_text = parent_bullet
+                                
+                                # Find the parent bullet's expansion
+                                parent_found = False
+                                for existing_key, existing_data in cluster["bullet_expansions"].items():
+                                    if existing_key == parent_bullet_text or (existing_data.get("original_bullet") and existing_data["original_bullet"] == parent_bullet_text):
+                                        # Initialize sub_expansions if it doesn't exist
+                                        if "sub_expansions" not in existing_data:
+                                            existing_data["sub_expansions"] = {}
+                                        
+                                        # Save the layer 2 expansion under the parent
+                                        existing_data["sub_expansions"][bullet_key] = expansion_data
+                                        parent_found = True
+                                        print(f"✔️ Saved layer 2 expansion '{bullet_key}' under parent '{existing_key}'")
+                                        break
+                                
+                                if not parent_found:
+                                    print(f"⚠️ Parent bullet not found for layer 2 expansion. Parent: '{parent_bullet_text}'")
+                                    # Fallback: save as separate entry
+                                    cluster["bullet_expansions"][bullet_key] = expansion_data
+                            else:
+                                print(f"⚠️ No parent_bullet provided for layer 2 expansion")
+                                # Fallback: save as separate entry
+                                cluster["bullet_expansions"][bullet_key] = expansion_data
+                        else:
+                            print(f"⚠️ Unsupported expansion layer: {layer}")
+
+                        # Save back to file (same as expand_cluster.py)
+                        with open(processed_file, "w", encoding="utf-8") as f:
+                            json.dump(processed_data, f, indent=2)
+
+                        print(
+                            f"💾 Saved expansion to cluster {topic_id} in {processed_file}"
+                        )
+                    else:
+                        print(f"⚠️ Cluster {topic_id} not found in processed data")
+                else:
+                    print(f"⚠️ Processed file not found: {processed_file}")
+            except Exception as save_error:
+                print(f"⚠️ Failed to save expansion: {save_error}")
+                # Don't fail the request if saving fails
+
+        return result
+    except Exception as e:
+        error_msg = f"Failed to expand bullet point: {str(e)}"
+        print(f"💥 Error: {error_msg}")
+        return {"error": error_msg}

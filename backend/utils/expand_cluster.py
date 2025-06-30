@@ -1,20 +1,9 @@
 import json
 import os
-from openai import OpenAI
 from dotenv import load_dotenv
+from .openai_client import get_openai_client
 
 load_dotenv()
-
-
-def get_openai_client():
-    """Initialize and return the OpenAI client, handling missing API key gracefully."""
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "OPENAI_API_KEY is not set in the environment variables."
-        )
-    return OpenAI(api_key=api_key)
-
 
 client = get_openai_client()
 
@@ -99,10 +88,15 @@ def expand_cluster(filename: str, cluster_id: str) -> dict:
     prompt = (
         "You are a helpful assistant generating concise bullet points for study notes.\n"
         "Below is a cluster of text chunks. Each chunk represents a key idea or example.\n"
-        "Generate a list of concise bullet points summarizing the most important ideas from the cluster.\n"
+        "Generate a list of 5-15 concise bullet points summarizing the most important ideas from the cluster.\n"
+        "- Each bullet should start with a bolded 'mini-header' that is ALWAYS phrased as a question, followed by a question mark.\n"
+        "- Examples: '**What is photosynthesis?**', '**How does neural transmission work?**', '**Why is this concept important?**'\n"
+        "- The question should act as a semantic anchor that students can use for self-testing.\n"
+        "- After the question, provide a clear and concise answer.\n"
+        "- Keep each bullet to a single idea.\n"
         "- Use clear and concise language.\n"
         "- Focus on key takeaways and avoid redundancy.\n"
-        "- Ensure the bullet points are suitable for study notes.\n\n"
+        "- Ensure the bullet points are suitable for study notes and self-testing.\n\n"
     )
     prompt += "\n".join(chunks)
 

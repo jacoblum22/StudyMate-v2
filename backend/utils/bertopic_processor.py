@@ -480,6 +480,7 @@ def _build_result_topics(
             "summary": cluster_info[i]["summary"],
             "keywords": [word for word, _ in topic_words_list[:5]],
             "examples": [chunk["text"] for chunk in all_topic_maps[tid][:3]],
+            "segment_positions": [chunk["position"] for chunk in all_topic_maps[tid]],
             "stats": topic_stats[tid],
         }
 
@@ -690,11 +691,22 @@ def process_with_bertopic(
         ordered_topic_ids, all_topic_maps, all_topic_models, cluster_info, topic_stats
     )
 
-    # Create basic result structure
+    # Create basic result structure with segments
+    # Prepare segments data similar to _save_processed_data
+    all_segments = []
+    # Add chunks from topics
+    for topic_chunks in all_topic_maps.values():
+        all_segments.extend(topic_chunks)
+    # Add noise chunks
+    all_segments.extend(all_noise_chunks)
+    # Sort by position
+    all_segments.sort(key=lambda x: x["position"])
+
     result = {
         "num_chunks": len(chunks),
         "num_topics": len(all_topic_maps),
         "total_tokens_used": total_tokens,
+        "segments": all_segments,  # Include segments for frontend usage
         "topics": result_topics,
     }
 
